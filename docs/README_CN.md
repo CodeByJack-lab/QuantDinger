@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/brokermr810/QuantDinger">
-    <img src="https://ai.quantdinger.com/img/logo.e0f510a8.png" alt="QuantDinger Logo" width="160" height="160">
+    <img src="screenshots/logo.jpg" alt="QuantDinger Logo" width="220" height="220">
   </a>
 
   <h1>QuantDinger</h1>
