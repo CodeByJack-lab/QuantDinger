@@ -118,6 +118,18 @@ my_indicator_description = "Buy pullbacks in an uptrend and exit on weakness."
 
 `# @param` 用来定义用户经常调的参数。
 
+格式如下：
+
+```python
+# @param <name> <int|float|bool|str|string> <default> <描述>
+```
+
+最佳实践：
+
+- 声明后的参数，应该通过 `params.get(...)` 读取
+- `string` 与 `str` 等价
+- 如果声明了参数，却仍然把值硬编码在正文里，平台内置的代码质量检查会给出提醒
+
 `# @strategy` 用来定义策略默认配置，比如：
 
 - `stopLossPct`：止损比例，例如 `0.03` 表示 3%
@@ -133,10 +145,11 @@ my_indicator_description = "Buy pullbacks in an uptrend and exit on weakness."
 - 这些是**引擎读取的默认配置**
 - 不是让你再去 dataframe 里造一列 `stop_loss`
 - 不要在这里写 `leverage`
+- 数值尽量保持合理，并结合回测验证；底层解析器允许的范围会比示例更宽松
 
 ### 3.2 第二步：复制 dataframe，再算指标
 
-Indicator 代码运行在沙盒里，`pd` 和 `np` 已预置。
+Indicator 代码运行在沙盒里，`pd`、`np` 和 `params` 字典已预置。
 
 推荐开头固定写：
 
@@ -274,6 +287,12 @@ output = {
 - 你在当前 K 线上画出来的“止损线”不等于系统一定按这根 K 线内部价格成交
 - 一旦用了 `shift(-1)`，就基本等于引入未来函数
 
+还要注意一个实现细节：
+
+- 标准工作流下，最常见的成交语义仍然是“收盘确认、下一根开盘成交”
+- 但保存后的策略快照，会根据产品配置被规范成 `next_bar_open` 或 `same_bar_close`
+- 如果你改了成交时机配置，不要凭印象判断结果，要重新回测并核对成交明细
+
 ---
 
 ## 4. 止盈止损和仓位管理到底怎么写
@@ -364,10 +383,10 @@ my_indicator_description = "Buy pullbacks above the slow EMA and exit on trend f
 
 df = df.copy()
 
-fast_len = 20
-slow_len = 50
-rsi_len = 14
-rsi_floor = 50.0
+fast_len = int(params.get('fast_len', 20))
+slow_len = int(params.get('slow_len', 50))
+rsi_len = int(params.get('rsi_len', 14))
+rsi_floor = float(params.get('rsi_floor', 50.0))
 
 ema_fast = df['close'].ewm(span=fast_len, adjust=False).mean()
 ema_slow = df['close'].ewm(span=slow_len, adjust=False).mean()
@@ -440,6 +459,112 @@ output = {
 - 固定风险默认值通过 `# @strategy` 单独声明
 - 图表输出是最后一步，不要和信号逻辑搅在一起
 
+### 5.1 一个更贴近平台 UI 的示例
+
+下面这个版本更接近 QuantDinger 当前真实使用方式：
+
+- 用 `# @param` 暴露常调参数
+- 用 `# @strategy` 暴露默认止损、止盈、仓位和跟踪止损
+- 显式声明 `tradeDirection`，让代码、保存后的策略、回测面板保持一致
+- 杠杆仍然留给产品 UI 管，不写进源码
+
+```python
+my_indicator_name = "Breakout Retest With Direction Control"
+my_indicator_description = "Breakout-and-retest logic with platform-friendly params and default risk settings."
+
+# @param breakout_len int 20 Breakout lookback bars
+# @param retest_buffer float 0.002 Retest tolerance ratio
+# @param volume_mult float 1.2 Minimum volume filter
+# @param ema_filter_len int 50 Trend filter EMA length
+
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+# @strategy entryPct 0.2
+# @strategy trailingEnabled true
+# @strategy trailingStopPct 0.015
+# @strategy trailingActivationPct 0.03
+# @strategy tradeDirection both
+
+df = df.copy()
+
+breakout_len = int(params.get('breakout_len', 20))
+retest_buffer = float(params.get('retest_buffer', 0.002))
+volume_mult = float(params.get('volume_mult', 1.2))
+ema_filter_len = int(params.get('ema_filter_len', 50))
+
+ema_filter = df['close'].ewm(span=ema_filter_len, adjust=False).mean()
+range_high = df['high'].rolling(breakout_len).max().shift(1)
+range_low = df['low'].rolling(breakout_len).min().shift(1)
+volume_avg = df['volume'].rolling(breakout_len).mean()
+
+long_breakout = df['close'] > range_high
+long_retest_ok = df['low'] <= range_high * (1 + retest_buffer)
+long_volume_ok = df['volume'] >= volume_avg * volume_mult
+long_trend_ok = df['close'] > ema_filter
+
+short_breakout = df['close'] < range_low
+short_retest_ok = df['high'] >= range_low * (1 - retest_buffer)
+short_volume_ok = df['volume'] >= volume_avg * volume_mult
+short_trend_ok = df['close'] < ema_filter
+
+raw_buy = long_breakout & long_retest_ok & long_volume_ok & long_trend_ok
+raw_sell = short_breakout & short_retest_ok & short_volume_ok & short_trend_ok
+
+buy = (raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))).astype(bool)
+sell = (raw_sell.fillna(False) & (~raw_sell.shift(1).fillna(False))).astype(bool)
+
+df['buy'] = buy
+df['sell'] = sell
+
+buy_marks = [df['low'].iloc[i] * 0.995 if buy.iloc[i] else None for i in range(len(df))]
+sell_marks = [df['high'].iloc[i] * 1.005 if sell.iloc[i] else None for i in range(len(df))]
+
+output = {
+    "name": my_indicator_name,
+    "plots": [
+        {
+            "name": "EMA Filter",
+            "data": ema_filter.fillna(0).tolist(),
+            "color": "#1890ff",
+            "overlay": True
+        },
+        {
+            "name": "Range High",
+            "data": range_high.fillna(0).tolist(),
+            "color": "#52c41a",
+            "overlay": True
+        },
+        {
+            "name": "Range Low",
+            "data": range_low.fillna(0).tolist(),
+            "color": "#f5222d",
+            "overlay": True
+        }
+    ],
+    "signals": [
+        {
+            "type": "buy",
+            "text": "L",
+            "data": buy_marks,
+            "color": "#00E676"
+        },
+        {
+            "type": "sell",
+            "text": "S",
+            "data": sell_marks,
+            "color": "#FF5252"
+        }
+    ]
+}
+```
+
+这个例子为什么更贴近平台：
+
+- `# @param` 的值可以直接被 AI 调参或手动参数修改流程接管
+- `# @strategy` 能和保存后的策略默认值、右侧回测面板风险配置更自然地对齐
+- `tradeDirection both` 让人一眼看出这份代码本身就是为多空双向设计的
+- 杠杆继续交给产品配置层，不会被藏进源码里造成误解
+
 ---
 
 ## 6. 什么时候该切到 ScriptStrategy
@@ -456,12 +581,16 @@ output = {
 
 ### 6.1 必需函数
 
-当前产品侧校验默认要求：
+面向当前产品链路，最稳妥的约定是：
 
 - `def on_init(ctx): ...`
 - `def on_bar(ctx, bar): ...`
 
-即使某些内部路径可能允许缺少 `on_init`，面向产品的策略代码也建议两个都写。
+原因是：
+
+- 运行时编译器真正强制的是 `on_bar`
+- 但部分产品侧校验路径仍然要求源码里同时存在 `on_init` 和 `on_bar`
+- 为了避免“运行时能跑、校验却不过”的不一致，建议两个函数都写，即使 `on_init` 只是做初始化或打印日志
 
 ### 6.2 可用对象
 
@@ -485,6 +614,12 @@ output = {
 - `ctx.buy(price=None, amount=None)`
 - `ctx.sell(price=None, amount=None)`
 - `ctx.close_position()`
+
+补充说明：
+
+- `ctx` 不会直接把完整交易配置对象暴露给脚本
+- 杠杆、交易标的、交易场所、账户凭证等，应放在产品配置层，而不是写死在脚本里
+- 脚本源码内部需要的默认参数，优先通过 `ctx.param(...)` 管理
 
 `ctx.position` 同时支持数值判断和字段访问，例如：
 
@@ -545,6 +680,104 @@ def on_bar(ctx, bar):
 
 这种写法适合“止盈止损属于运行时持仓管理”的场景，而不是单纯图表信号输出。
 
+仓位语义还要补一句：
+
+- 在当前系统里，保存后的策略回测，仓位大小仍然主要由规范化后的交易配置决定，例如 `entryPct`
+- 因此 `ctx.buy()` / `ctx.sell()` 里的 `amount` 更适合理解成运行时下单意图，而不是回测仓位的唯一来源
+- 真正准备上模拟盘或实盘前，一定要先通过“保存后的策略回测”核对实际仓位暴露
+
+### 6.4 普通脚本模式与 bot 模式
+
+大多数 `ScriptStrategy` 都运行在**已收盘 K 线**语义下：
+
+- 引擎会在 bar 确认收盘后调用 `on_bar(ctx, bar)`
+- 这也是普通策略回测和逐 bar 实盘最接近的心智模型
+
+当前系统里还存在 bot 风格运行模式：
+
+- bot 模式下，系统可能会基于最新价格构造“类 tick 的伪 bar”反复调用 `on_bar`
+- 这种模式更适合网格、DCA 或其他更偏机器人执行的策略
+- 如果你的脚本是为 bot 模式设计的，应该和标准 bar-close 策略分开测试，不要混为一谈
+
+### 6.5 一个更贴近平台实盘的 ScriptStrategy 示例
+
+下面这个例子更接近平台里真实可落地的实盘脚本写法：
+
+- 用 `ctx.param(...)` 管脚本级默认参数
+- 先看 `ctx.position`，再决定是开仓、反手、减仓还是全部平仓
+- 用 `ctx.buy()` / `ctx.sell()` 表达方向性下单意图
+- 当你的语义是“现在全部退出”时，用 `ctx.close_position()` 最明确
+
+```python
+def on_init(ctx):
+    ctx.log("live strategy initialized")
+
+
+def on_bar(ctx, bar):
+    fast_len = int(ctx.param("fast_len", 10))
+    slow_len = int(ctx.param("slow_len", 30))
+    risk_pct = float(ctx.param("risk_pct", 0.25))
+    stop_loss_pct = float(ctx.param("stop_loss_pct", 0.02))
+    take_profit_pct = float(ctx.param("take_profit_pct", 0.05))
+    allow_short = bool(ctx.param("allow_short", True))
+
+    bars = ctx.bars(slow_len + 5)
+    if len(bars) < slow_len:
+        return
+
+    closes = [b.close for b in bars]
+    fast_ma = sum(closes[-fast_len:]) / fast_len
+    slow_ma = sum(closes[-slow_len:]) / slow_len
+    price = bar.close
+
+    if not ctx.position:
+        if fast_ma > slow_ma:
+            ctx.buy(price=price, amount=risk_pct)
+            return
+        if allow_short and fast_ma < slow_ma:
+            ctx.sell(price=price, amount=risk_pct)
+            return
+        return
+
+    if ctx.position["side"] == "long":
+        entry_price = float(ctx.position["entry_price"])
+        if price <= entry_price * (1 - stop_loss_pct):
+            ctx.close_position()
+            return
+        if price >= entry_price * (1 + take_profit_pct):
+            ctx.close_position()
+            return
+        if allow_short and fast_ma < slow_ma:
+            ctx.sell(price=price, amount=risk_pct)
+            return
+
+    if ctx.position["side"] == "short":
+        entry_price = float(ctx.position["entry_price"])
+        if price >= entry_price * (1 + stop_loss_pct):
+            ctx.close_position()
+            return
+        if price <= entry_price * (1 - take_profit_pct):
+            ctx.close_position()
+            return
+        if fast_ma > slow_ma:
+            ctx.buy(price=price, amount=risk_pct)
+            return
+```
+
+这个例子重点演示了：
+
+- `ctx.param(...)` 让脚本默认值集中且清晰
+- `ctx.position` 决定当前是空仓、做多还是做空分支
+- `ctx.buy()` / `ctx.sell()` 表达的是方向性意图，不只是孤立的“开多”或“开空”
+- 当规则的语义是“现在全部退出”时，`ctx.close_position()` 最不容易产生歧义
+
+下面这些回测 / 实盘差异一定要记住：
+
+- 标准脚本回测和普通实盘模式都以“已确认收盘的 bar”为核心，但 bot 模式可能会用类 tick 的伪 bar 反复驱动脚本
+- `amount` 更适合理解成运行时下单意图；保存后的策略回测，仓位大小仍然主要受 `entryPct` 这类规范化交易配置影响
+- 当你在多头持仓中调用 `ctx.sell()`，或在空头持仓中调用 `ctx.buy()` 时，实际效果可能会根据运行时状态与产品配置表现为“先平后反手”一类意图
+- 如果你要的是明确的“全部平仓”，优先用 `ctx.close_position()`，不要依赖隐式解释
+
 ---
 
 ## 7. 回测、持久化与当前限制
@@ -565,8 +798,9 @@ def on_bar(ctx, bar):
 
 当前限制包括：
 
-- `cross_sectional` 在当前策略快照链路中还未完全打通
+- `cross_sectional` 在当前策略快照链路中不支持
 - `ScriptStrategy` 当前不支持 `cross_sectional` 实盘运行
+- 脚本策略回测当前不会走指标侧的 MTF 执行路径
 - 策略回测要求 symbol 合法且代码非空
 
 ---
@@ -599,7 +833,7 @@ def on_bar(ctx, bar):
 
 - 指标型默认值用 `# @param` 和 `# @strategy`
 - 脚本型默认值优先用 `ctx.param()`
-- 杠杆、交易所、账户凭证放在产品配置层，不要硬编码
+- 杠杆、成交时机、交易所和账户凭证放在产品配置层，不要硬编码
 
 ---
 
@@ -646,7 +880,384 @@ def on_bar(ctx, bar):
 
 ---
 
-## 10. 推荐开发流程
+## 10. 完整工作流：从 Indicator IDE 到保存成策略再到实盘
+
+这是目前最符合产品链路的实战流程。
+
+### 10.1 先在 Indicator IDE 里做原型
+
+在策略还处于构思阶段时，优先从 Indicator IDE 开始：
+
+1. 先把指标逻辑写在 `df` 上。
+2. 用 `# @param` 声明可调参数。
+3. 用 `# @strategy` 声明默认止损、止盈、仓位和方向。
+4. 补齐图表展示需要的 `plots` 和 `signals`。
+5. 先跑指标侧回测，确认信号密度、图表观感和成交语义都合理。
+
+这个阶段的目标不是立刻上实盘，而是先把策略逻辑变得可见、可测、可迭代。
+
+### 10.2 在产品里调参与校验
+
+当指标逻辑已经基本正确后：
+
+1. 先跑代码质量检查，排除缺少元数据或明显可疑写法。
+2. 用真实的标的、周期、手续费、滑点、杠杆配置去跑回测。
+3. 必要时使用 AI 调参或结构化扫参比较参数组合。
+4. 把最终采用的参数重新写回源码，让代码本身仍然是最直观的“单一真相”。
+
+这里推荐的分工方式是：
+
+- 信号逻辑由代码表达
+- `# @param` 和 `# @strategy` 表达默认参数和风控
+- 市场、杠杆、日期区间、执行环境由产品面板管理
+
+### 10.3 把指标保存成策略
+
+当信号模型稳定后：
+
+1. 先保存当前指标代码。
+2. 通过产品流程创建或保存策略记录。
+3. 确认保存后的策略快照模式、默认值和交易配置都符合预期。
+4. 从持久化后的策略记录发起策略回测，而不是只看编辑器里的即时结果。
+
+这一步很关键，因为：
+
+- 保存后的策略回测更接近真实执行链路
+- 规范化快照可能会补齐成交时机和交易配置默认值
+- 很多 symbol、模式、配置、持久化层面的错配，都是在这一步才暴露出来
+
+### 10.4 判断 IndicatorStrategy 是否已经够用
+
+如果满足下面这些条件，就继续保留 `IndicatorStrategy`：
+
+- 进出场核心仍然主要靠信号驱动
+- 固定止损、止盈、跟踪止损默认值已经足够
+- 不需要依赖当前持仓状态做复杂运行时逻辑
+
+如果出现下面这些需求，就应升级成 `ScriptStrategy`：
+
+- 开仓后要持续盯着持仓逐根处理
+- 退出逻辑依赖当前持仓状态，而不只是历史序列
+- 需要冷却期、分批止盈、加仓、减仓、机器人式执行逻辑
+
+### 10.5 进入模拟盘或实盘前的最后检查
+
+在真正开启实盘前，至少确认：
+
+1. 交易所 / 经纪商 / 标的 / 凭证配置正确。
+2. 对成交时机的假设已经再次核实。
+3. 杠杆、方向、仓位大小放在了正确的产品配置层。
+4. 先用保守仓位、小范围标的做验证。
+5. 观察运行日志和真实下单行为，再决定是否放大规模。
+
+实盘不是编辑器实验的自然延伸，而是一个单独的验证阶段。
+
+---
+
+## 11. 常见错误示例 vs 正确写法
+
+这一节专门列出最容易把回测做“虚高”、把策略行为写混乱、或者把产品配置和策略代码搞串的高频坑点。
+
+### 11.1 声明了 `# @param`，却根本没读取
+
+错误写法：
+
+```python
+# @param fast_len int 20 Fast EMA length
+
+df = df.copy()
+fast_len = 20
+ema_fast = df['close'].ewm(span=fast_len, adjust=False).mean()
+```
+
+正确写法：
+
+```python
+# @param fast_len int 20 Fast EMA length
+
+df = df.copy()
+fast_len = int(params.get('fast_len', 20))
+ema_fast = df['close'].ewm(span=fast_len, adjust=False).mean()
+```
+
+为什么：
+
+- 只声明不读取，会让参数变成“看起来能调，实际上调不动”
+- 平台代码质量检查也可能对此给出提醒
+
+### 11.2 `buy` / `sell` 每根 bar 都在触发
+
+错误写法：
+
+```python
+df['buy'] = df['close'] > ema_fast
+df['sell'] = df['close'] < ema_fast
+```
+
+正确写法：
+
+```python
+raw_buy = df['close'] > ema_fast
+raw_sell = df['close'] < ema_fast
+
+df['buy'] = (raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))).astype(bool)
+df['sell'] = (raw_sell.fillna(False) & (~raw_sell.shift(1).fillna(False))).astype(bool)
+```
+
+为什么：
+
+- 如果每根 bar 都重复发信号，进出场、标记、回测解释都会变得混乱
+- 大多数策略真正想表达的是“条件刚刚成立时触发一次”，而不是“条件持续成立就一直触发”
+
+### 11.3 把杠杆写进策略源码
+
+错误写法：
+
+```python
+# @strategy leverage 10
+```
+
+正确写法：
+
+```python
+# @strategy entryPct 0.2
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+```
+
+然后把杠杆放到产品面板或保存后的策略交易配置里。
+
+为什么：
+
+- 杠杆属于执行配置，不属于指标元数据
+- 把杠杆藏进代码里，会让回测解释更混乱，也更容易和产品侧配置打架
+
+### 11.4 误用 `shift(-1)`，把未来函数写进策略
+
+错误写法：
+
+```python
+df['buy'] = (df['close'].shift(-1) > ema_fast).fillna(False)
+```
+
+正确写法：
+
+```python
+raw_buy = df['close'] > ema_fast
+df['buy'] = (raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))).astype(bool)
+```
+
+为什么：
+
+- `shift(-1)` 本质上是在偷看未来数据
+- 这类策略在回测里往往会“好得离谱”，但一到真实执行就失真
+
+### 11.5 在 `ScriptStrategy` 里把 `amount` 当成绝对回测仓位
+
+错误心智模型：
+
+```python
+ctx.buy(price=bar.close, amount=1.0)
+```
+
+“这就等于回测里永远按 100% 仓位开仓。”
+
+正确心智模型：
+
+```python
+position_pct = float(ctx.param("risk_pct", 0.25))
+ctx.buy(price=bar.close, amount=position_pct)
+```
+
+然后再用保存后的策略回测去核对规范化交易配置。
+
+为什么：
+
+- 在当前系统里，保存后的策略回测，仓位大小仍然主要由 `entryPct` 这类规范化配置决定
+- `amount` 更适合理解成运行时下单意图，而不是历史回测仓位的唯一真相
+
+### 11.6 明明想“全部平仓”，却写成了 `ctx.sell()` / `ctx.buy()`
+
+容易歧义的写法：
+
+```python
+if stop_hit:
+    ctx.sell(price=bar.close, amount=0.25)
+```
+
+更清晰的写法：
+
+```python
+if stop_hit:
+    ctx.close_position()
+```
+
+为什么：
+
+- `ctx.buy()` / `ctx.sell()` 表达的是方向性意图，最终效果会结合当前持仓状态解释
+- 如果你的规则语义就是“现在全部退出”，`ctx.close_position()` 最不容易被误解
+
+### 11.7 信号退出和引擎退出混着用，却没写说明
+
+容易出问题的写法：
+
+```python
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+
+df['sell'] = some_other_exit_condition
+```
+
+更好的写法：
+
+```python
+# Primary exit: reverse signal
+# Secondary protection: engine-managed fixed stop-loss / take-profit
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+
+df['sell'] = reverse_signal
+```
+
+为什么：
+
+- 两种退出方式并存本身不一定错
+- 真正的问题是没人说得清“到底谁是主退出来源”
+
+---
+
+## 12. 平台支持字段速查表
+
+这一节可以当成“当前平台到底支持什么”的速查页，写策略时可以直接对着查。
+
+### 12.1 `# @strategy` 支持的 key
+
+| Key | 含义 | 常见写法 | 说明 |
+|-----|------|----------|------|
+| `stopLossPct` | 默认止损比例 | `# @strategy stopLossPct 0.02` | 引擎读取的默认风控配置 |
+| `takeProfitPct` | 默认止盈比例 | `# @strategy takeProfitPct 0.05` | 底层解析器允许范围比示例更宽松 |
+| `entryPct` | 默认开仓资金占比 | `# @strategy entryPct 0.25` | 是回测仓位的重要来源之一 |
+| `trailingEnabled` | 是否开启跟踪止损 | `# @strategy trailingEnabled true` | 布尔值 |
+| `trailingStopPct` | 跟踪止损比例 | `# @strategy trailingStopPct 0.015` | 通常与 trailing 一起使用 |
+| `trailingActivationPct` | 启动跟踪止损前的盈利阈值 | `# @strategy trailingActivationPct 0.03` | 通常与 trailing 一起使用 |
+| `tradeDirection` | 方向限制 | `# @strategy tradeDirection both` | 可选 `long`、`short`、`both` |
+
+要点：
+
+- 这些 key 用于指标侧默认策略配置
+- 不要把 `leverage` 写进 `# @strategy`
+- 交易所、标的、凭证、杠杆都应该放在产品配置层
+
+### 12.2 `# @param` 速查格式
+
+| 部分 | 示例 | 含义 |
+|------|------|------|
+| 名称 | `fast_len` | 参数键名 |
+| 类型 | `int` / `float` / `bool` / `str` / `string` | 支持的类型 |
+| 默认值 | `20` | 系统看到的默认值 |
+| 描述 | `Fast EMA length` | 给人看的说明 |
+
+示例：
+
+```python
+# @param fast_len int 20 Fast EMA length
+# @param allow_short bool true Allow short entries
+```
+
+随后用下面这种方式读取：
+
+```python
+fast_len = int(params.get('fast_len', 20))
+allow_short = bool(params.get('allow_short', True))
+```
+
+### 12.3 `ScriptStrategy` 里的 `ctx` 支持什么
+
+| 项目 | 类型 | 含义 |
+|------|------|------|
+| `ctx.param(name, default)` | 方法 | 读取或初始化脚本级默认参数 |
+| `ctx.bars(n=1)` | 方法 | 取得当前运行时之前的最近若干根 bar |
+| `ctx.log(message)` | 方法 | 写策略日志 |
+| `ctx.buy(price=None, amount=None)` | 方法 | 表达买入 / 做多方向意图 |
+| `ctx.sell(price=None, amount=None)` | 方法 | 表达卖出 / 做空方向意图 |
+| `ctx.close_position()` | 方法 | 显式全部平仓 |
+| `ctx.position` | 字段 | 当前持仓对象 |
+| `ctx.balance` | 字段 | 当前余额快照 |
+| `ctx.equity` | 字段 | 当前权益快照 |
+
+`ctx.position` 常见字段：
+
+| 字段 | 含义 |
+|------|------|
+| `side` | `long`、`short`，或空字符串表示空仓 |
+| `size` | 当前持仓大小 |
+| `entry_price` | 平均开仓价 |
+| `direction` | `1`、`-1`、`0` |
+| `amount` | 运行时数量镜像 |
+
+### 12.4 `ScriptStrategy` 里的 `bar` 有哪些字段
+
+| 字段 | 含义 |
+|------|------|
+| `bar.open` | 开盘价 |
+| `bar.high` | 最高价 |
+| `bar.low` | 最低价 |
+| `bar.close` | 收盘价 |
+| `bar.volume` | 成交量 |
+| `bar.timestamp` | 当前运行时传入的时间值 |
+
+### 12.5 `IndicatorStrategy` 的 `output` 允许哪些结构
+
+顶层结构通常写成：
+
+```python
+output = {
+    "name": my_indicator_name,
+    "plots": [],
+    "signals": [],
+    "calculatedVars": {}
+}
+```
+
+顶层常见 key：
+
+| Key | 是否必需 | 含义 |
+|-----|----------|------|
+| `name` | 建议提供 | 展示名称 |
+| `plots` | 建议提供 | 图表曲线输出 |
+| `signals` | 建议提供 | 买卖点标记输出 |
+| `calculatedVars` | 可选 | 额外元数据或计算结果 |
+
+每个 `plot` 项常见字段：
+
+| Key | 含义 |
+|-----|------|
+| `name` | 曲线名称 |
+| `data` | 与 `len(df)` 对齐的数组 |
+| `color` | 显示颜色 |
+| `overlay` | 是否叠加在主图上 |
+| `type` | 可选的渲染提示 |
+
+每个 `signal` 项常见字段：
+
+| Key | 含义 |
+|-----|------|
+| `type` | `buy` 或 `sell` |
+| `text` | 标记文本 |
+| `color` | 标记颜色 |
+| `data` | 与 `len(df)` 对齐的数组；无信号位置用 `None` |
+
+### 12.6 快速提醒
+
+- `df['buy']` 和 `df['sell']` 应该是布尔值，并与 `df` 长度完全对齐
+- 尽量使用边缘触发信号
+- 不要在信号逻辑里使用 `shift(-1)`
+- 当规则语义明显是“全部退出”时，优先用 `ctx.close_position()`
+- `amount` 更适合作为运行时下单意图，最终仓位仍应通过保存后的策略回测核实
+
+---
+
+## 13. 推荐开发流程
 
 1. 先用 `IndicatorStrategy` 把想法原型化。
 2. 先验证图表、信号密度和 next-bar-open 的回测语义。

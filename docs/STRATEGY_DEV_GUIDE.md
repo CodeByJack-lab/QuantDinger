@@ -118,6 +118,18 @@ my_indicator_description = "Buy pullbacks in an uptrend and exit on weakness."
 
 Use `# @param` for values the user may tune often.
 
+Format:
+
+```python
+# @param <name> <int|float|bool|str|string> <default> <description>
+```
+
+Best practice:
+
+- read declared params through `params.get(...)`
+- `string` is accepted as the same type family as `str`
+- if you declare params but hardcode the values instead, the built-in code quality checker will flag it
+
 Use `# @strategy` for strategy defaults such as:
 
 - `stopLossPct`: stop-loss ratio, for example `0.03` = 3%
@@ -133,10 +145,11 @@ Important:
 - These are **defaults consumed by the engine**.
 - They are not extra dataframe columns.
 - Do not put `leverage` here.
+- Keep the values realistic and confirm them in backtests; the parser is intentionally more permissive than the toy examples shown here.
 
 ### 3.2 Step 2: Copy the dataframe and compute indicators
 
-Indicator code runs in a sandbox. `pd` and `np` are already available.
+Indicator code runs in a sandbox. `pd`, `np`, and a `params` dictionary are already available.
 
 Recommended baseline:
 
@@ -274,6 +287,12 @@ This matters because:
 - an intrabar-looking stop drawn on the current candle is not the same as a next-bar-open fill
 - using `shift(-1)` in signal logic introduces look-ahead bias
 
+Practical nuance:
+
+- the normalized strategy snapshot can execute with either `next_bar_open` or `same_bar_close`
+- most indicator workflows should still be designed with a "confirm on close, usually fill on next open" mental model
+- if product settings change the execution timing, rerun the backtest and review fills instead of assuming the semantics stayed the same
+
 ---
 
 ## 4. How To Write Stop-Loss, Take-Profit, and Position Sizing
@@ -364,10 +383,10 @@ my_indicator_description = "Buy pullbacks above the slow EMA and exit on trend f
 
 df = df.copy()
 
-fast_len = 20
-slow_len = 50
-rsi_len = 14
-rsi_floor = 50.0
+fast_len = int(params.get('fast_len', 20))
+slow_len = int(params.get('slow_len', 50))
+rsi_len = int(params.get('rsi_len', 14))
+rsi_floor = float(params.get('rsi_floor', 50.0))
 
 ema_fast = df['close'].ewm(span=fast_len, adjust=False).mean()
 ema_slow = df['close'].ewm(span=slow_len, adjust=False).mean()
@@ -440,6 +459,112 @@ What this example teaches:
 - fixed risk defaults are declared separately through `# @strategy`
 - chart output is treated as a final rendering step, not mixed into signal logic
 
+### 5.1 A platform-UI-aligned example
+
+This version is closer to how developers actually use QuantDinger today:
+
+- tune common values through `# @param`
+- expose default stop / take-profit / entry sizing through `# @strategy`
+- set `tradeDirection` explicitly so the saved strategy and backtest panel stay aligned
+- keep leverage outside the code and let the product UI own it
+
+```python
+my_indicator_name = "Breakout Retest With Direction Control"
+my_indicator_description = "Breakout-and-retest logic with platform-friendly params and default risk settings."
+
+# @param breakout_len int 20 Breakout lookback bars
+# @param retest_buffer float 0.002 Retest tolerance ratio
+# @param volume_mult float 1.2 Minimum volume filter
+# @param ema_filter_len int 50 Trend filter EMA length
+
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+# @strategy entryPct 0.2
+# @strategy trailingEnabled true
+# @strategy trailingStopPct 0.015
+# @strategy trailingActivationPct 0.03
+# @strategy tradeDirection both
+
+df = df.copy()
+
+breakout_len = int(params.get('breakout_len', 20))
+retest_buffer = float(params.get('retest_buffer', 0.002))
+volume_mult = float(params.get('volume_mult', 1.2))
+ema_filter_len = int(params.get('ema_filter_len', 50))
+
+ema_filter = df['close'].ewm(span=ema_filter_len, adjust=False).mean()
+range_high = df['high'].rolling(breakout_len).max().shift(1)
+range_low = df['low'].rolling(breakout_len).min().shift(1)
+volume_avg = df['volume'].rolling(breakout_len).mean()
+
+long_breakout = df['close'] > range_high
+long_retest_ok = df['low'] <= range_high * (1 + retest_buffer)
+long_volume_ok = df['volume'] >= volume_avg * volume_mult
+long_trend_ok = df['close'] > ema_filter
+
+short_breakout = df['close'] < range_low
+short_retest_ok = df['high'] >= range_low * (1 - retest_buffer)
+short_volume_ok = df['volume'] >= volume_avg * volume_mult
+short_trend_ok = df['close'] < ema_filter
+
+raw_buy = long_breakout & long_retest_ok & long_volume_ok & long_trend_ok
+raw_sell = short_breakout & short_retest_ok & short_volume_ok & short_trend_ok
+
+buy = (raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))).astype(bool)
+sell = (raw_sell.fillna(False) & (~raw_sell.shift(1).fillna(False))).astype(bool)
+
+df['buy'] = buy
+df['sell'] = sell
+
+buy_marks = [df['low'].iloc[i] * 0.995 if buy.iloc[i] else None for i in range(len(df))]
+sell_marks = [df['high'].iloc[i] * 1.005 if sell.iloc[i] else None for i in range(len(df))]
+
+output = {
+    "name": my_indicator_name,
+    "plots": [
+        {
+            "name": "EMA Filter",
+            "data": ema_filter.fillna(0).tolist(),
+            "color": "#1890ff",
+            "overlay": True
+        },
+        {
+            "name": "Range High",
+            "data": range_high.fillna(0).tolist(),
+            "color": "#52c41a",
+            "overlay": True
+        },
+        {
+            "name": "Range Low",
+            "data": range_low.fillna(0).tolist(),
+            "color": "#f5222d",
+            "overlay": True
+        }
+    ],
+    "signals": [
+        {
+            "type": "buy",
+            "text": "L",
+            "data": buy_marks,
+            "color": "#00E676"
+        },
+        {
+            "type": "sell",
+            "text": "S",
+            "data": sell_marks,
+            "color": "#FF5252"
+        }
+    ]
+}
+```
+
+Why this example maps cleanly to the UI:
+
+- `# @param` values can be tuned by AI or by manual parameter editing workflows
+- `# @strategy` defaults line up with saved strategy defaults and backtest-side risk settings
+- `tradeDirection both` makes it obvious that the code is designed for long and short signals
+- leverage is still controlled in the product panel instead of being hidden inside source code
+
 ---
 
 ## 6. When You Should Switch to ScriptStrategy
@@ -456,12 +581,16 @@ Typical triggers:
 
 ### 6.1 Required functions
 
-Current product-facing verification expects:
+The safest product-facing contract is:
 
 - `def on_init(ctx): ...`
 - `def on_bar(ctx, bar): ...`
 
-Even if some internal runtime paths can tolerate a missing `on_init`, you should define both.
+Why this matters:
+
+- the runtime compiler strictly requires `on_bar`
+- some product-side validation paths still expect both `on_init` and `on_bar`
+- to avoid validator/runtime mismatches, define both functions even if `on_init` only initializes state or writes a log line
 
 ### 6.2 Available objects
 
@@ -485,6 +614,12 @@ Even if some internal runtime paths can tolerate a missing `on_init`, you should
 - `ctx.buy(price=None, amount=None)`
 - `ctx.sell(price=None, amount=None)`
 - `ctx.close_position()`
+
+Notes:
+
+- `ctx` does not expose the full trading config object directly
+- keep leverage, symbol, venue, and credentials in product configuration rather than hardcoding them into the script
+- use `ctx.param(...)` for script-level defaults that belong in source code
 
 `ctx.position` supports both numeric checks and field access patterns such as:
 
@@ -545,6 +680,104 @@ def on_bar(ctx, bar):
 
 Use this style when stop-loss and take-profit truly belong to runtime position management instead of pure indicator output.
 
+Important sizing note:
+
+- in the current system, saved-strategy backtests still derive position sizing primarily from normalized trading config such as `entryPct`
+- treat `amount` in `ctx.buy()` / `ctx.sell()` as runtime order intent, not as the only source of truth for backtest sizing
+- always verify actual exposure with a saved-strategy backtest before promoting the script to paper or live trading
+
+### 6.4 Normal script mode vs bot mode
+
+Most `ScriptStrategy` workflows run on **closed bars**:
+
+- the engine evaluates `on_bar(ctx, bar)` after a bar is confirmed
+- this is the best mental model for standard strategy backtests and bar-by-bar live execution
+
+There is also a bot-style runtime mode in the current system:
+
+- bot mode may feed `on_bar` with synthetic tick-like bars built from the latest price
+- this is more suitable for grid, DCA, or other bot-style execution patterns
+- if you write code intended for bot mode, test it separately from standard bar-close strategy behavior
+
+### 6.5 A platform-live-oriented ScriptStrategy example
+
+This example is closer to how a platform-facing live strategy is usually written:
+
+- use `ctx.param(...)` for script defaults
+- inspect `ctx.position` before deciding whether to open, reverse, reduce, or fully close
+- use `ctx.buy()` / `ctx.sell()` for directional intent
+- use `ctx.close_position()` when you want an explicit full exit
+
+```python
+def on_init(ctx):
+    ctx.log("live strategy initialized")
+
+
+def on_bar(ctx, bar):
+    fast_len = int(ctx.param("fast_len", 10))
+    slow_len = int(ctx.param("slow_len", 30))
+    risk_pct = float(ctx.param("risk_pct", 0.25))
+    stop_loss_pct = float(ctx.param("stop_loss_pct", 0.02))
+    take_profit_pct = float(ctx.param("take_profit_pct", 0.05))
+    allow_short = bool(ctx.param("allow_short", True))
+
+    bars = ctx.bars(slow_len + 5)
+    if len(bars) < slow_len:
+        return
+
+    closes = [b.close for b in bars]
+    fast_ma = sum(closes[-fast_len:]) / fast_len
+    slow_ma = sum(closes[-slow_len:]) / slow_len
+    price = bar.close
+
+    if not ctx.position:
+        if fast_ma > slow_ma:
+            ctx.buy(price=price, amount=risk_pct)
+            return
+        if allow_short and fast_ma < slow_ma:
+            ctx.sell(price=price, amount=risk_pct)
+            return
+        return
+
+    if ctx.position["side"] == "long":
+        entry_price = float(ctx.position["entry_price"])
+        if price <= entry_price * (1 - stop_loss_pct):
+            ctx.close_position()
+            return
+        if price >= entry_price * (1 + take_profit_pct):
+            ctx.close_position()
+            return
+        if allow_short and fast_ma < slow_ma:
+            ctx.sell(price=price, amount=risk_pct)
+            return
+
+    if ctx.position["side"] == "short":
+        entry_price = float(ctx.position["entry_price"])
+        if price >= entry_price * (1 + stop_loss_pct):
+            ctx.close_position()
+            return
+        if price <= entry_price * (1 - take_profit_pct):
+            ctx.close_position()
+            return
+        if fast_ma > slow_ma:
+            ctx.buy(price=price, amount=risk_pct)
+            return
+```
+
+What this example demonstrates:
+
+- `ctx.param(...)` keeps script defaults visible and editable in source
+- `ctx.position` is the switch that separates flat / long / short behavior
+- `ctx.buy()` and `ctx.sell()` express directional intent, not just "open long" or "open short" in isolation
+- `ctx.close_position()` is the clearest choice when your rule means "exit everything now"
+
+Backtest vs live differences you should remember:
+
+- standard script backtests and normal live mode both think in confirmed-bar logic, but bot mode may call the script with synthetic tick-like bars
+- `amount` is best treated as runtime order intent; saved-strategy backtests still size mainly from normalized trading config such as `entryPct`
+- `ctx.sell()` while long, or `ctx.buy()` while short, may behave like a close-plus-reverse style intent depending on runtime state and product configuration
+- if you want a guaranteed full flatten action, prefer `ctx.close_position()` over relying on implicit interpretation
+
 ---
 
 ## 7. Backtesting, Persistence, and Current Limits
@@ -565,8 +798,9 @@ Current run types include:
 
 Current limitations:
 
-- cross-sectional strategies are not fully supported in the current strategy snapshot flow
+- cross-sectional strategies are not supported in the current strategy snapshot flow
 - `ScriptStrategy` does not support `cross_sectional` live execution mode
+- script-strategy backtests do not use the indicator MTF execution path
 - strategy backtests expect a valid symbol and non-empty code
 
 ---
@@ -599,7 +833,7 @@ For `ScriptStrategy`, avoid hidden state outside `ctx`, avoid randomness, and ma
 
 - use `# @param` and `# @strategy` for indicator defaults
 - use `ctx.param()` for script defaults
-- keep leverage, venue configuration, and credentials outside the strategy code
+- keep leverage, signal timing, venue configuration, and credentials outside the strategy code
 
 ---
 
@@ -646,7 +880,384 @@ If strategy creation, verification, backtest, or execution fails, check backend 
 
 ---
 
-## 10. Recommended Development Workflow
+## 10. Full Workflow: Indicator IDE -> Saved Strategy -> Live Trading
+
+This is the most practical product workflow for most teams.
+
+### 10.1 Prototype in Indicator IDE
+
+Start in the Indicator IDE when you are still shaping the idea:
+
+1. Write indicator logic on `df`.
+2. Declare tunable inputs with `# @param`.
+3. Declare default risk settings with `# @strategy`.
+4. Add chart-friendly `plots` and `signals`.
+5. Run indicator-side backtests until the signal density and fills make sense.
+
+At this stage, the goal is not to perfect live execution. The goal is to make the logic visible, testable, and easy to iterate.
+
+### 10.2 Tune and validate in the product
+
+Once the indicator behaves correctly:
+
+1. Use the code quality checker to catch missing metadata or suspicious patterns.
+2. Run backtests with realistic symbol, timeframe, commission, slippage, and leverage settings.
+3. If needed, use AI tuning or structured tuning to compare parameter combinations.
+4. Apply tuned values back into the code so the source remains the single visible truth.
+
+Recommended mindset:
+
+- let the code describe the signal logic
+- let `# @param` and `# @strategy` describe tunable defaults
+- let the panel own market, leverage, date range, and execution environment
+
+### 10.3 Save the indicator as a strategy
+
+Once the signal model is stable:
+
+1. Save the current indicator code.
+2. Create or save a strategy record from the product flow.
+3. Confirm that the saved strategy snapshot has the expected mode, defaults, and trading config.
+4. Run strategy backtests from the persisted record, not only from the raw editor state.
+
+Why this matters:
+
+- saved-strategy backtests are closer to the real execution path
+- normalized snapshots may apply execution timing and trading-config defaults differently from the raw editor view
+- this is the right place to catch symbol, mode, config, and persistence mismatches
+
+### 10.4 Decide whether IndicatorStrategy is enough
+
+Stay with `IndicatorStrategy` if:
+
+- entries and exits are mainly signal-based
+- fixed stop-loss / take-profit / trailing defaults are enough
+- you do not need position-state-dependent runtime logic
+
+Promote to `ScriptStrategy` if:
+
+- the open position must be monitored bar by bar
+- exits depend on current position state rather than only on historical series
+- you need cooldowns, partial exits, scale-ins, or bot-like runtime behavior
+
+### 10.5 Move to paper or live trading carefully
+
+Before enabling live trading:
+
+1. Verify exchange, broker, symbol, and credential configuration.
+2. Recheck execution timing assumptions.
+3. Confirm that leverage, direction, and sizing live in the right product configuration layer.
+4. Start with conservative sizing and narrow symbol scope.
+5. Review runtime logs and actual order behavior before scaling up.
+
+Live trading should be treated as a separate validation stage, not as a continuation of editor-only experimentation.
+
+---
+
+## 11. Common Mistakes vs Correct Patterns
+
+This section highlights the mistakes that most often cause misleading backtests, confusing strategy behavior, or product/runtime mismatches.
+
+### 11.1 Declaring `# @param` but never reading it
+
+Wrong:
+
+```python
+# @param fast_len int 20 Fast EMA length
+
+df = df.copy()
+fast_len = 20
+ema_fast = df['close'].ewm(span=fast_len, adjust=False).mean()
+```
+
+Correct:
+
+```python
+# @param fast_len int 20 Fast EMA length
+
+df = df.copy()
+fast_len = int(params.get('fast_len', 20))
+ema_fast = df['close'].ewm(span=fast_len, adjust=False).mean()
+```
+
+Why:
+
+- declaring a param tells the product and AI tuning flow that the value is intended to be adjustable
+- if the code never reads `params.get(...)`, the declaration becomes cosmetic and the quality checker may warn
+
+### 11.2 Making `buy` / `sell` fire on every bar
+
+Wrong:
+
+```python
+df['buy'] = df['close'] > ema_fast
+df['sell'] = df['close'] < ema_fast
+```
+
+Correct:
+
+```python
+raw_buy = df['close'] > ema_fast
+raw_sell = df['close'] < ema_fast
+
+df['buy'] = (raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))).astype(bool)
+df['sell'] = (raw_sell.fillna(False) & (~raw_sell.shift(1).fillna(False))).astype(bool)
+```
+
+Why:
+
+- repeated signals on every bar can distort entries, exits, and chart markers
+- edge-triggered signals are usually closer to the intended strategy semantics
+
+### 11.3 Writing leverage into the strategy source
+
+Wrong:
+
+```python
+# @strategy leverage 10
+```
+
+Correct:
+
+```python
+# @strategy entryPct 0.2
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+```
+
+Then set leverage in the product panel or saved-strategy trading configuration.
+
+Why:
+
+- leverage belongs to execution configuration, not indicator metadata
+- hiding leverage in code makes backtests harder to read and easier to misconfigure
+
+### 11.4 Using `shift(-1)` and accidentally introducing look-ahead bias
+
+Wrong:
+
+```python
+df['buy'] = (df['close'].shift(-1) > ema_fast).fillna(False)
+```
+
+Correct:
+
+```python
+raw_buy = df['close'] > ema_fast
+df['buy'] = (raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))).astype(bool)
+```
+
+Why:
+
+- `shift(-1)` reaches into future data
+- strategies that look amazing with future leakage usually collapse in real execution
+
+### 11.5 Treating `ctx.buy(..., amount=...)` as absolute backtest size
+
+Wrong mental model:
+
+```python
+ctx.buy(price=bar.close, amount=1.0)
+```
+
+"This guarantees the backtest always uses exactly 100% of capital."
+
+Correct mental model:
+
+```python
+position_pct = float(ctx.param("risk_pct", 0.25))
+ctx.buy(price=bar.close, amount=position_pct)
+```
+
+And then verify the saved-strategy backtest using the normalized trading config.
+
+Why:
+
+- in the current system, saved-strategy backtests still derive sizing mainly from normalized config such as `entryPct`
+- `amount` is best treated as runtime order intent, not as the only source of truth for historical sizing
+
+### 11.6 Using `ctx.sell()` or `ctx.buy()` when you really mean "fully flatten now"
+
+Risky:
+
+```python
+if stop_hit:
+    ctx.sell(price=bar.close, amount=0.25)
+```
+
+Clearer:
+
+```python
+if stop_hit:
+    ctx.close_position()
+```
+
+Why:
+
+- `ctx.buy()` / `ctx.sell()` express directional intent and may be interpreted through current position state
+- if your rule means "exit everything now", `ctx.close_position()` is the least ambiguous choice
+
+### 11.7 Mixing signal exits and engine exits without documenting it
+
+Risky:
+
+```python
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+
+df['sell'] = some_other_exit_condition
+```
+
+Better:
+
+```python
+# Primary exit: reverse signal
+# Secondary protection: engine-managed fixed stop-loss / take-profit
+# @strategy stopLossPct 0.02
+# @strategy takeProfitPct 0.05
+
+df['sell'] = reverse_signal
+```
+
+Why:
+
+- the combination itself may be valid
+- the real problem is when nobody knows which exit path is supposed to dominate
+
+---
+
+## 12. Platform Reference Sheet
+
+Use this section as a fast "what is supported right now?" reference when writing strategy code.
+
+### 12.1 `# @strategy` supported keys
+
+| Key | Meaning | Typical Example | Notes |
+|-----|---------|-----------------|-------|
+| `stopLossPct` | Default stop-loss ratio | `# @strategy stopLossPct 0.02` | Engine-managed default risk setting |
+| `takeProfitPct` | Default take-profit ratio | `# @strategy takeProfitPct 0.05` | Engine parser is more permissive than the toy examples |
+| `entryPct` | Default capital allocation ratio | `# @strategy entryPct 0.25` | Common source of backtest sizing |
+| `trailingEnabled` | Enable trailing stop logic | `# @strategy trailingEnabled true` | Boolean |
+| `trailingStopPct` | Trailing stop ratio | `# @strategy trailingStopPct 0.015` | Used with trailing enabled |
+| `trailingActivationPct` | Profit threshold before trailing activates | `# @strategy trailingActivationPct 0.03` | Used with trailing enabled |
+| `tradeDirection` | Direction filter | `# @strategy tradeDirection both` | `long`, `short`, or `both` |
+
+Important:
+
+- these keys are for indicator-side strategy defaults
+- do not put `leverage` in `# @strategy`
+- keep exchange, symbol, credentials, and leverage in product configuration
+
+### 12.2 `# @param` quick format
+
+| Part | Example | Meaning |
+|------|---------|---------|
+| Name | `fast_len` | Parameter key |
+| Type | `int` / `float` / `bool` / `str` / `string` | Supported types |
+| Default | `20` | Default value shown to the system |
+| Description | `Fast EMA length` | Human-readable hint |
+
+Example:
+
+```python
+# @param fast_len int 20 Fast EMA length
+# @param allow_short bool true Allow short entries
+```
+
+And then read them with:
+
+```python
+fast_len = int(params.get('fast_len', 20))
+allow_short = bool(params.get('allow_short', True))
+```
+
+### 12.3 `ctx` methods and fields for `ScriptStrategy`
+
+| Item | Type | Meaning |
+|------|------|---------|
+| `ctx.param(name, default)` | method | Read or initialize script-level defaults |
+| `ctx.bars(n=1)` | method | Get recent bars up to the current runtime index |
+| `ctx.log(message)` | method | Write strategy log messages |
+| `ctx.buy(price=None, amount=None)` | method | Express buy / long-side intent |
+| `ctx.sell(price=None, amount=None)` | method | Express sell / short-side intent |
+| `ctx.close_position()` | method | Explicitly flatten current position |
+| `ctx.position` | field | Current position object |
+| `ctx.balance` | field | Runtime balance snapshot |
+| `ctx.equity` | field | Runtime equity snapshot |
+
+`ctx.position` common fields:
+
+| Field | Meaning |
+|-------|---------|
+| `side` | `long`, `short`, or empty when flat |
+| `size` | Current position size |
+| `entry_price` | Average entry price |
+| `direction` | `1`, `-1`, or `0` |
+| `amount` | Runtime amount mirror |
+
+### 12.4 `bar` fields for `ScriptStrategy`
+
+| Field | Meaning |
+|-------|---------|
+| `bar.open` | Open price |
+| `bar.high` | High price |
+| `bar.low` | Low price |
+| `bar.close` | Close price |
+| `bar.volume` | Volume |
+| `bar.timestamp` | Time value from runtime feed |
+
+### 12.5 `output` structure for `IndicatorStrategy`
+
+Top-level structure:
+
+```python
+output = {
+    "name": my_indicator_name,
+    "plots": [],
+    "signals": [],
+    "calculatedVars": {}
+}
+```
+
+Supported top-level keys:
+
+| Key | Required | Meaning |
+|-----|----------|---------|
+| `name` | recommended | Display name |
+| `plots` | recommended | Chart series output |
+| `signals` | recommended | Buy/sell marker output |
+| `calculatedVars` | optional | Extra metadata or computed values |
+
+Each `plot` item commonly contains:
+
+| Key | Meaning |
+|-----|---------|
+| `name` | Plot label |
+| `data` | List aligned to `len(df)` |
+| `color` | Display color |
+| `overlay` | Whether to draw on price chart |
+| `type` | Optional rendering hint |
+
+Each `signal` item commonly contains:
+
+| Key | Meaning |
+|-----|---------|
+| `type` | `buy` or `sell` |
+| `text` | Marker label |
+| `color` | Marker color |
+| `data` | List aligned to `len(df)`, using `None` where no marker exists |
+
+### 12.6 Fast reminders
+
+- `df['buy']` and `df['sell']` should be boolean and length-aligned
+- prefer edge-triggered signals
+- avoid `shift(-1)` in signal logic
+- prefer `ctx.close_position()` when the rule clearly means "exit everything now"
+- treat `amount` as runtime order intent, then verify sizing with saved-strategy backtests
+
+---
+
+## 13. Recommended Development Workflow
 
 1. Prototype the idea as an `IndicatorStrategy`.
 2. Validate plots, signal density, and next-bar-open backtest behavior.

@@ -1,19 +1,22 @@
 # ============================================================
-# 截面策略指标示例 - 动量+RSI综合评分
-# Cross-Sectional Strategy Indicator Example
+# 截面策略指标示例（研究参考版）
+# Cross-Sectional Strategy Indicator Example (Research Reference)
 # Momentum + RSI Composite Score
 # ============================================================
-# 
+#
 # 使用方法:
-# 1. 在交易助手中创建截面策略
-# 2. 选择此指标作为策略指标
-# 3. 配置标的列表、持仓大小、做多比例等参数
-# 
+# 1. 作为截面研究思路示例阅读
+# 2. 用于理解“对多个标的打分再排序”的基本写法
+#
+# 当前限制:
+# - 当前平台文档已明确：cross_sectional 还不在主策略快照回测 / 实盘链路里
+# - 因此这个示例更适合作为研究参考，而不是直接照搬到当前标准实盘流程
+#
 # 评分逻辑:
-# - 动量因子 (20周期): 价格变化率，越高越好
-# - RSI指标 (14周期): 反转RSI值，越低越好（100 - RSI）
-# - 综合评分: 70% 动量 + 30% RSI反转值
-# 
+# - 动量因子（20周期）：价格变化率，越高越好
+# - RSI 指标（14周期）：反转 RSI 值，越低越好（100 - RSI）
+# - 综合评分：70% 动量 + 30% RSI 反转值
+#
 # ============================================================
 
 # 截面策略指标
@@ -22,9 +25,9 @@
 
 scores = {}
 
-# Iterate through all symbols
+# 遍历全部标的
 for symbol, df in data.items():
-    # Ensure we have enough data
+    # 确保数据长度足够
     if len(df) < 20:
         scores[symbol] = 0
         continue
@@ -35,7 +38,7 @@ for symbol, df in data.items():
     
     # === 2. 计算RSI指标 (14周期) ===
     def calculate_rsi(prices, period=14):
-        """计算RSI指标"""
+        """计算 RSI 指标"""
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -50,18 +53,18 @@ for symbol, df in data.items():
     # RSI越低（超卖）= 评分越高（100 - RSI）
     # 权重: 70% 动量 + 30% RSI反转值
     momentum_score = momentum
-    rsi_score = 100 - rsi_value  # 反转RSI（RSI越低，评分越高）
+    rsi_score = 100 - rsi_value  # 反转 RSI（RSI 越低，评分越高）
     
     composite_score = momentum_score * 0.7 + rsi_score * 0.3
     
     scores[symbol] = composite_score
 
-# === 可选: 手动指定排序 ===
-# 如果不提供，系统会根据scores自动排序
+# === 可选：手动指定排序 ===
+# 如果不提供，系统会根据 scores 自动排序
 # rankings = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
 
-# === 系统自动处理逻辑 ===
+# === 研究语义说明 ===
 # 1. 根据评分对所有标的进行排序（从高到低）
-# 2. 选择排名靠前的N个标的做多（基于 portfolio_size * long_ratio）
-# 3. 选择排名靠后的N个标的做空（基于 portfolio_size * (1 - long_ratio)）
-# 4. 自动生成买入/卖出/平仓信号
+# 2. 选择排名靠前的 N 个标的做多（基于 portfolio_size * long_ratio）
+# 3. 选择排名靠后的 N 个标的做空（基于 portfolio_size * (1 - long_ratio)）
+# 4. 在未来平台链路完善后，可由系统统一生成买入 / 卖出 / 平仓动作
