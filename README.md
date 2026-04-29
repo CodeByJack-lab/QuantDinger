@@ -722,6 +722,12 @@ Crypto donations:
 
 ## Acknowledgements
 
+### Community contributors
+
+Thanks to contributors who improve QuantDinger via pull requests:
+
+- [leonideos](https://github.com/leonideos): MOEX (Moscow Exchange) equities data source (analysis/backtest only); see [PR #70](https://github.com/brokermr810/QuantDinger/pull/70).
+
 QuantDinger stands on top of a strong open-source ecosystem. Special thanks to projects such as:
 
 - [Flask](https://flask.palletsprojects.com/)
