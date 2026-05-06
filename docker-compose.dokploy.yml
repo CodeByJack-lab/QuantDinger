@@ -25,8 +25,24 @@ services:
       retries: 5
 
   # ─────────────────────────────────────────────
+  # Redis
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: quantdinger-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - dokploy-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
   # Backend (Flask API)
-  # 所有 env 從 Dokploy Environment Variables 自動注入
   # ─────────────────────────────────────────────
   backend:
     build:
@@ -37,6 +53,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - backend_logs:/app/logs
       - backend_data:/app/data
@@ -46,6 +64,7 @@ services:
       - TZ=Asia/Hong_Kong
       - DATABASE_URL=postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-quantdinger}
       - DB_TYPE=postgresql
+      - REDIS_URL=redis://redis:6379/0
     networks:
       - dokploy-network
     healthcheck:
@@ -81,6 +100,8 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
     driver: local
   backend_logs:
     driver: local
