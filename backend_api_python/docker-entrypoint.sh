@@ -1,25 +1,38 @@
 #!/bin/sh
 # QuantDinger Docker Entrypoint Script
 # Checks and validates SECRET_KEY before starting the application
-
 set -e
-
 echo "============================================"
 echo "  QuantDinger Backend - Starting..."
 echo "============================================"
 
 # Check if .env file exists
 if [ ! -f /app/.env ]; then
-    echo "[WARNING] .env file not found at /app/.env"
-    echo "Creating .env from env.example..."
-    if [ -f /app/env.example ]; then
-        cp /app/env.example /app/.env
-        echo "[INFO] Created .env from env.example"
-        echo "[IMPORTANT] Please edit /app/.env and set a secure SECRET_KEY before restarting!"
-    else
-        echo "[ERROR] env.example not found. Cannot create .env automatically."
-        exit 1
-    fi
+    echo "[INFO] No .env file mounted, generating from environment variables..."
+    cat > /app/.env << ENVEOF
+SECRET_KEY=${SECRET_KEY:-$(python3 -c "import secrets; print(secrets.token_hex(32))")}
+ADMIN_USER=${ADMIN_USER:-quantdinger}
+ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+DEBUG=${DEBUG:-False}
+DOMAIN=${DOMAIN:-}
+DATABASE_URL=${DATABASE_URL:-}
+DB_TYPE=${DB_TYPE:-postgresql}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+FRONTEND_URL=${FRONTEND_URL:-}
+LLM_PROVIDER=${LLM_PROVIDER:-}
+OPENAI_API_KEY=${OPENAI_API_KEY:-}
+OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+OPENAI_MODEL=${OPENAI_MODEL:-}
+MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+ENABLE_PENDING_ORDER_WORKER=${ENABLE_PENDING_ORDER_WORKER:-true}
+ENABLE_PORTFOLIO_MONITOR=${ENABLE_PORTFOLIO_MONITOR:-true}
+AGENT_LIVE_TRADING_ENABLED=${AGENT_LIVE_TRADING_ENABLED:-false}
+BILLING_ENABLED=${BILLING_ENABLED:-false}
+USDT_PAY_ENABLED=${USDT_PAY_ENABLED:-false}
+ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-true}
+ENVEOF
+    echo "[OK] Generated .env from environment variables"
 fi
 
 # Check SECRET_KEY configuration
